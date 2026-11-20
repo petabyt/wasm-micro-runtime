@@ -831,6 +831,56 @@ fd_object_get(struct fd_table *curfds, struct fd_object **fo, __wasi_fd_t fd,
     return error;
 }
 
+#if defined(__linux__) || defined(__APPLE__)
+int
+wamr_dup_socket_from_table(struct fd_table *curfds, uint32_t fd)
+{
+    struct fd_object *fo;
+    int result = -1;
+    if (!curfds || fd_object_get(curfds, &fo, fd, 0, 0) != 0) {
+        errno = EBADF;
+        return -1;
+    }
+    if (fo->type == __WASI_FILETYPE_SOCKET_STREAM
+        || fo->type == __WASI_FILETYPE_SOCKET_DGRAM)
+        result = fcntl(fo->file_handle, F_DUPFD_CLOEXEC, 0);
+    else
+        errno = ENOTSOCK;
+    fd_object_release(NULL, fo);
+    return result;
+}
+#endif
+
+/* Keep the table's socket alive throughout the synchronous host callback. */
+uint32_t
+wamr_with_socket_from_table(struct fd_table *curfds, uint32_t fd,
+                            uint32_t (*callback)(uintptr_t, void *),
+                            void *user_data)
+{
+    struct fd_object *fo;
+    __wasi_errno_t error;
+    uintptr_t socket;
+
+    if (!curfds || !callback)
+        return __WASI_EINVAL;
+    error = fd_object_get(curfds, &fo, fd, 0, 0);
+    if (error != __WASI_ESUCCESS)
+        return error;
+    if (fo->type != __WASI_FILETYPE_SOCKET_STREAM
+        && fo->type != __WASI_FILETYPE_SOCKET_DGRAM) {
+        fd_object_release(NULL, fo);
+        return __WASI_ENOTSOCK;
+    }
+#if defined(BH_PLATFORM_WINDOWS)
+    socket = (uintptr_t)fo->file_handle->raw.socket;
+#else
+    socket = (uintptr_t)fo->file_handle;
+#endif
+    error = callback(socket, user_data);
+    fd_object_release(NULL, fo);
+    return error;
+}
+
 __wasi_errno_t
 wasmtime_ssp_fd_datasync(wasm_exec_env_t exec_env, struct fd_table *curfds,
                          __wasi_fd_t fd)
@@ -2317,10 +2367,13 @@ wasmtime_ssp_poll_oneoff(wasm_exec_env_t exec_env, struct fd_table *curfds,
                     };
                 }
                 else if ((pfds[i].revents & POLLERR) != 0) {
-                    // File descriptor is in an error state.
+                    // Socket errors indicate readiness: the next socket
+                    // operation or SO_ERROR reports the pending error.
                     out[(*nevents)++] = (__wasi_event_t){
                         .userdata = in[i].userdata,
-                        .error = __WASI_EIO,
+                        .error = (fos[i]->type == __WASI_FILETYPE_SOCKET_STREAM
+                                  || fos[i]->type == __WASI_FILETYPE_SOCKET_DGRAM)
+                                     ? __WASI_ESUCCESS : __WASI_EIO,
                         .type = in[i].u.type,
                     };
                 }

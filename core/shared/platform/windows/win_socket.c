@@ -13,6 +13,53 @@
 
 static bool is_winsock_inited = false;
 
+/* The WASI socket wrappers translate errno, not WSAGetLastError(). */
+static int
+socket_error(void)
+{
+    switch (WSAGetLastError()) {
+        case WSAEWOULDBLOCK: errno = EAGAIN; break;
+        case WSAEINPROGRESS: errno = EINPROGRESS; break;
+        case WSAEALREADY: errno = EALREADY; break;
+        case WSAECONNREFUSED: errno = ECONNREFUSED; break;
+        case WSAECONNRESET: errno = ECONNRESET; break;
+        case WSAECONNABORTED: errno = ECONNABORTED; break;
+        case WSAENOTCONN: errno = ENOTCONN; break;
+        case WSAEADDRINUSE: errno = EADDRINUSE; break;
+        case WSAEADDRNOTAVAIL: errno = EADDRNOTAVAIL; break;
+        case WSAETIMEDOUT: errno = ETIMEDOUT; break;
+        case WSAENETUNREACH: errno = ENETUNREACH; break;
+        case WSAEHOSTUNREACH: errno = EHOSTUNREACH; break;
+        case WSAEACCES: errno = EACCES; break;
+        case WSAEINTR: errno = EINTR; break;
+        case WSAENOTSOCK: errno = ENOTSOCK; break;
+        default: errno = EINVAL; break;
+    }
+    return BHT_ERROR;
+}
+
+static int
+socket_address(const struct sockaddr_in *addr, bh_sockaddr_t *out)
+{
+    if (addr->sin_family != AF_INET) {
+        errno = EAFNOSUPPORT;
+        return BHT_ERROR;
+    }
+    out->is_ipv4 = true;
+    out->port = ntohs(addr->sin_port);
+    out->addr_buffer.ipv4 = ntohl(addr->sin_addr.s_addr);
+    return BHT_OK;
+}
+
+static int
+socket_option(bh_socket_t socket, int level, int option, int value)
+{
+    if (setsockopt(socket->raw.socket, level, option, (const char *)&value,
+                   sizeof(value)) == SOCKET_ERROR)
+        return socket_error();
+    return BHT_OK;
+}
+
 #define CHECK_VALID_SOCKET_HANDLE(win_handle)                   \
     do {                                                        \
         if ((win_handle) == NULL) {                             \
@@ -82,6 +129,8 @@ os_socket_create(bh_socket_t *sock, bool is_ipv4, bool is_tcp)
         af = AF_INET;
     }
     else {
+        BH_FREE(*sock);
+        *sock = NULL;
         errno = ENOSYS;
         return BHT_ERROR;
     }
@@ -94,8 +143,11 @@ os_socket_create(bh_socket_t *sock, bool is_ipv4, bool is_tcp)
     }
 
     if ((*sock)->raw.socket == INVALID_SOCKET) {
+        int error = WSAGetLastError();
         BH_FREE(*sock);
-        return BHT_ERROR;
+        *sock = NULL;
+        WSASetLastError(error);
+        return socket_error();
     }
 
     return BHT_OK;
@@ -131,7 +183,7 @@ os_socket_bind(bh_socket_t socket, const char *host, int *port)
     return BHT_OK;
 
 fail:
-    return BHT_ERROR;
+    return socket_error();
 }
 
 int
@@ -144,7 +196,7 @@ os_socket_settimeout(bh_socket_t socket, uint64 timeout_us)
     if (setsockopt(socket->raw.socket, SOL_SOCKET, SO_RCVTIMEO,
                    (const char *)&tv, sizeof(tv))
         != 0) {
-        return BHT_ERROR;
+        return socket_error();
     }
 
     return BHT_OK;
@@ -156,8 +208,7 @@ os_socket_listen(bh_socket_t socket, int max_client)
     CHECK_VALID_SOCKET_HANDLE(socket);
 
     if (listen(socket->raw.socket, max_client) != 0) {
-        os_printf("socket listen failed with error %d\n", WSAGetLastError());
-        return BHT_ERROR;
+        return socket_error();
     }
 
     return BHT_OK;
@@ -186,9 +237,11 @@ os_socket_accept(bh_socket_t server_sock, bh_socket_t *sock, void *addr,
                                  (struct sockaddr *)&addr_tmp, (int *)&len);
 
     if ((*sock)->raw.socket == INVALID_SOCKET) {
+        int error = WSAGetLastError();
         BH_FREE(*sock);
-        os_printf("socket accept failed with error %d\n", WSAGetLastError());
-        return BHT_ERROR;
+        *sock = NULL;
+        WSASetLastError(error);
+        return socket_error();
     }
 
     return BHT_OK;
@@ -199,7 +252,8 @@ os_socket_recv(bh_socket_t socket, void *buf, unsigned int len)
 {
     CHECK_VALID_SOCKET_HANDLE(socket);
 
-    return recv(socket->raw.socket, buf, len, 0);
+    int ret = recv(socket->raw.socket, buf, len, 0);
+    return ret == SOCKET_ERROR ? socket_error() : ret;
 }
 
 int
@@ -208,9 +262,16 @@ os_socket_recv_from(bh_socket_t socket, void *buf, unsigned int len, int flags,
 {
     CHECK_VALID_SOCKET_HANDLE(socket);
 
-    errno = ENOSYS;
-
-    return BHT_ERROR;
+    struct sockaddr_in addr = { 0 };
+    int addr_len = sizeof(addr);
+    int ret = recvfrom(socket->raw.socket, buf, len, flags,
+                       src_addr ? (struct sockaddr *)&addr : NULL,
+                       src_addr ? &addr_len : NULL);
+    if (ret == SOCKET_ERROR)
+        return socket_error();
+    if (src_addr && socket_address(&addr, src_addr) != BHT_OK)
+        return BHT_ERROR;
+    return ret;
 }
 
 int
@@ -218,7 +279,8 @@ os_socket_send(bh_socket_t socket, const void *buf, unsigned int len)
 {
     CHECK_VALID_SOCKET_HANDLE(socket);
 
-    return send(socket->raw.socket, buf, len, 0);
+    int ret = send(socket->raw.socket, buf, len, 0);
+    return ret == SOCKET_ERROR ? socket_error() : ret;
 }
 
 int
@@ -227,9 +289,17 @@ os_socket_send_to(bh_socket_t socket, const void *buf, unsigned int len,
 {
     CHECK_VALID_SOCKET_HANDLE(socket);
 
-    errno = ENOSYS;
-
-    return BHT_ERROR;
+    if (!dest_addr || !dest_addr->is_ipv4) {
+        errno = EAFNOSUPPORT;
+        return BHT_ERROR;
+    }
+    struct sockaddr_in addr = { 0 };
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(dest_addr->port);
+    addr.sin_addr.s_addr = htonl(dest_addr->addr_buffer.ipv4);
+    int ret = sendto(socket->raw.socket, buf, len, flags,
+                     (struct sockaddr *)&addr, sizeof(addr));
+    return ret == SOCKET_ERROR ? socket_error() : ret;
 }
 
 int
@@ -285,9 +355,22 @@ os_socket_connect(bh_socket_t socket, const char *addr, int port)
 {
     CHECK_VALID_SOCKET_HANDLE(socket);
 
-    errno = ENOSYS;
-
-    return BHT_ERROR;
+    struct sockaddr_in target = { 0 };
+    target.sin_family = AF_INET;
+    target.sin_port = htons(port);
+    if (inet_pton(AF_INET, addr, &target.sin_addr) != 1) {
+        errno = EINVAL;
+        return BHT_ERROR;
+    }
+    if (connect(socket->raw.socket, (struct sockaddr *)&target, sizeof(target))
+        == SOCKET_ERROR) {
+        if (WSAGetLastError() == WSAEWOULDBLOCK) {
+            errno = EINPROGRESS;
+            return BHT_ERROR;
+        }
+        return socket_error();
+    }
+    return BHT_OK;
 }
 
 int
@@ -306,9 +389,12 @@ os_socket_addr_local(bh_socket_t socket, bh_sockaddr_t *sockaddr)
 {
     CHECK_VALID_SOCKET_HANDLE(socket);
 
-    errno = ENOSYS;
-
-    return BHT_ERROR;
+    struct sockaddr_in addr = { 0 };
+    int len = sizeof(addr);
+    if (getsockname(socket->raw.socket, (struct sockaddr *)&addr, &len)
+        == SOCKET_ERROR)
+        return socket_error();
+    return socket_address(&addr, sockaddr);
 }
 
 int
@@ -336,9 +422,12 @@ os_socket_set_recv_timeout(bh_socket_t socket, uint64 timeout_us)
 {
     CHECK_VALID_SOCKET_HANDLE(socket);
 
-    errno = ENOSYS;
-
-    return BHT_ERROR;
+    uint64 ms = timeout_us / 1000 + (timeout_us % 1000 != 0);
+    if (ms > INT32_MAX) {
+        errno = EINVAL;
+        return BHT_ERROR;
+    }
+    return socket_option(socket, SOL_SOCKET, SO_RCVTIMEO, (int)ms);
 }
 
 int
@@ -356,9 +445,12 @@ os_socket_addr_remote(bh_socket_t socket, bh_sockaddr_t *sockaddr)
 {
     CHECK_VALID_SOCKET_HANDLE(socket);
 
-    errno = ENOSYS;
-
-    return BHT_ERROR;
+    struct sockaddr_in addr = { 0 };
+    int len = sizeof(addr);
+    if (getpeername(socket->raw.socket, (struct sockaddr *)&addr, &len)
+        == SOCKET_ERROR)
+        return socket_error();
+    return socket_address(&addr, sockaddr);
 }
 
 int
@@ -426,9 +518,7 @@ os_socket_set_reuse_addr(bh_socket_t socket, bool is_enabled)
 {
     CHECK_VALID_SOCKET_HANDLE(socket);
 
-    errno = ENOSYS;
-
-    return BHT_ERROR;
+    return socket_option(socket, SOL_SOCKET, SO_REUSEADDR, is_enabled);
 }
 
 int
@@ -486,9 +576,7 @@ os_socket_set_tcp_no_delay(bh_socket_t socket, bool is_enabled)
 {
     CHECK_VALID_SOCKET_HANDLE(socket);
 
-    errno = ENOSYS;
-
-    return BHT_ERROR;
+    return socket_option(socket, IPPROTO_TCP, TCP_NODELAY, is_enabled);
 }
 
 int
@@ -690,9 +778,7 @@ os_socket_set_broadcast(bh_socket_t socket, bool is_enabled)
 {
     CHECK_VALID_SOCKET_HANDLE(socket);
 
-    errno = ENOSYS;
-
-    return BHT_ERROR;
+    return socket_option(socket, SOL_SOCKET, SO_BROADCAST, is_enabled);
 }
 
 int

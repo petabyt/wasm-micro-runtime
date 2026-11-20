@@ -163,6 +163,9 @@ set_target_properties (vmlib PROPERTIES
 target_link_libraries (vmlib ${LLVM_AVAILABLE_LIBS} ${UV_A_LIBS})
 if (MINGW)
   target_link_libraries (vmlib ws2_32)
+  if (WAMR_BUILD_LIBC_WASI EQUAL 1)
+    target_link_libraries (vmlib pathcch bcrypt)
+  endif ()
 endif ()
 
 if (WIN32)

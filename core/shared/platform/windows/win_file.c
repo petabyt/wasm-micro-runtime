@@ -7,7 +7,7 @@
 #include "libc_errno.h"
 #include "win_util.h"
 
-#include "PathCch.h"
+#include "pathcch.h"
 
 #pragma comment(lib, "Pathcch.lib")
 
@@ -965,6 +965,29 @@ os_readv(os_file_handle handle, const struct __wasi_iovec_t *iov, int iovcnt,
 {
     CHECK_VALID_HANDLE(handle);
 
+    if (handle->type == windows_handle_type_socket) {
+        WSABUF *buffers;
+        DWORD received = 0, flags = 0;
+        *nread = 0;
+        if (!iovcnt)
+            return __WASI_ESUCCESS;
+        if (iovcnt < 0 || (size_t)iovcnt > UINT32_MAX / sizeof(*buffers))
+            return __WASI_EINVAL;
+        buffers = BH_MALLOC((uint32_t)(sizeof(*buffers) * (size_t)iovcnt));
+        if (!buffers)
+            return __WASI_ENOMEM;
+        for (int i = 0; i < iovcnt; i++) {
+            buffers[i].buf = (char *)iov[i].buf;
+            buffers[i].len = iov[i].buf_len > ULONG_MAX ? ULONG_MAX : (ULONG)iov[i].buf_len;
+        }
+        int result = WSARecv(handle->raw.socket, buffers, (DWORD)iovcnt,
+                             &received, &flags, NULL, NULL);
+        int error = result == SOCKET_ERROR ? WSAGetLastError() : 0;
+        BH_FREE(buffers);
+        *nread = received;
+        return error ? convert_winsock_error_code(error) : __WASI_ESUCCESS;
+    }
+
     LARGE_INTEGER current_offset = { .QuadPart = 0 };
 
     // Seek to the current offset before reading
@@ -1066,6 +1089,29 @@ os_writev(os_file_handle handle, const struct __wasi_ciovec_t *iov, int iovcnt,
           size_t *nwritten)
 {
     CHECK_VALID_HANDLE(handle);
+
+    if (handle->type == windows_handle_type_socket) {
+        WSABUF *buffers;
+        DWORD sent = 0;
+        *nwritten = 0;
+        if (!iovcnt)
+            return __WASI_ESUCCESS;
+        if (iovcnt < 0 || (size_t)iovcnt > UINT32_MAX / sizeof(*buffers))
+            return __WASI_EINVAL;
+        buffers = BH_MALLOC((uint32_t)(sizeof(*buffers) * (size_t)iovcnt));
+        if (!buffers)
+            return __WASI_ENOMEM;
+        for (int i = 0; i < iovcnt; i++) {
+            buffers[i].buf = (char *)iov[i].buf;
+            buffers[i].len = iov[i].buf_len > ULONG_MAX ? ULONG_MAX : (ULONG)iov[i].buf_len;
+        }
+        int result = WSASend(handle->raw.socket, buffers, (DWORD)iovcnt,
+                             &sent, 0, NULL, NULL);
+        int error = result == SOCKET_ERROR ? WSAGetLastError() : 0;
+        BH_FREE(buffers);
+        *nwritten = sent;
+        return error ? convert_winsock_error_code(error) : __WASI_ESUCCESS;
+    }
 
     bool append = (handle->fdflags & __WASI_FDFLAG_APPEND) != 0;
     LARGE_INTEGER write_offset = { .QuadPart = 0 };
@@ -1295,13 +1341,13 @@ os_readlinkat(os_file_handle handle, const char *path, char *buf,
 
         if (wbufsize >= 4 && wbuf[0] == L'\\' && wbuf[1] == L'?'
             && wbuf[2] == L'?' && wbuf[3] == L'\\') {
-            // Starts with \??\ 
+            // Starts with the NT namespace prefix.
             if (wbufsize >= 6
                 && ((wbuf[4] >= L'A' && wbuf[4] <= L'Z')
                     || (wbuf[4] >= L'a' && wbuf[4] <= L'z'))
                 && wbuf[5] == L':' && (wbufsize == 6 || wbuf[6] == L'\\'))
                 {
-                    // \??\<drive>:\ 
+                    // NT namespace prefix followed by a drive path.
                     wbuf += 4;
                     wbufsize -= 4;
                 }
@@ -1310,7 +1356,7 @@ os_readlinkat(os_file_handle handle, const char *path, char *buf,
                          && (wbuf[6] == L'C' || wbuf[6] == L'c')
                          && wbuf[7] == L'\\')
                 {
-                    // \??\UNC\<server>\<share>\ - make sure the final path looks like \\<server>\<share>\ 
+                    // Convert the NT namespace UNC path to a normal UNC path.
                     wbuf += 6;
                     wbuf[0] = L'\\';
                     wbufsize -= 6;

@@ -146,6 +146,18 @@ convert_winsock_error_code(int error_code)
             return __WASI_ECONNABORTED;
         case WSAECONNRESET:
             return __WASI_ECONNRESET;
+        case WSAECONNREFUSED:
+            return __WASI_ECONNREFUSED;
+        case WSAEADDRINUSE:
+            return __WASI_EADDRINUSE;
+        case WSAEADDRNOTAVAIL:
+            return __WASI_EADDRNOTAVAIL;
+        case WSAETIMEDOUT:
+            return __WASI_ETIMEDOUT;
+        case WSAENETUNREACH:
+            return __WASI_ENETUNREACH;
+        case WSAEHOSTUNREACH:
+            return __WASI_EHOSTUNREACH;
         case WSAENOTCONN:
             return __WASI_ENOTCONN;
         case WSAEINVALIDPROCTABLE:

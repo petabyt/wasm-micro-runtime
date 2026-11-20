@@ -694,6 +694,10 @@ WASM_RUNTIME_API_EXTERN void
 wasm_runtime_set_wasi_addr_pool(wasm_module_t module, const char *addr_pool[],
                                 uint32_t addr_pool_size);
 
+/* Linux and macOS: returns an owned close-on-exec duplicate, or -1 on failure. */
+WASM_RUNTIME_API_EXTERN int
+wasm_runtime_dup_wasi_socket(wasm_module_inst_t module_inst, uint32_t fd);
+
 WASM_RUNTIME_API_EXTERN void
 wasm_runtime_set_wasi_ns_lookup_pool(wasm_module_t module,
                                      const char *ns_lookup_pool[],

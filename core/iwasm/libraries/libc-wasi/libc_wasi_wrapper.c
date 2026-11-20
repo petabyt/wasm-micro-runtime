@@ -79,6 +79,29 @@ wasi_ctx_get_curfds(wasi_ctx_t wasi_ctx)
     return wasi_ctx->curfds;
 }
 
+#if defined(__linux__) || defined(__APPLE__)
+extern int wamr_dup_socket_from_table(struct fd_table *, uint32_t);
+int
+wasm_runtime_dup_wasi_socket(wasm_module_inst_t module_inst, uint32_t fd)
+{
+    return wamr_dup_socket_from_table(
+        wasi_ctx_get_curfds(get_wasi_ctx(module_inst)), fd);
+}
+#endif
+
+/* Experimental host hook; the callback must not retain or close the socket. */
+extern uint32_t wamr_with_socket_from_table(struct fd_table *, uint32_t,
+                                            uint32_t (*)(uintptr_t, void *),
+                                            void *);
+uint32_t
+wasm_runtime_with_wasi_socket(wasm_module_inst_t module_inst, uint32_t fd,
+                              uint32_t (*callback)(uintptr_t, void *),
+                              void *user_data)
+{
+    return wamr_with_socket_from_table(
+        wasi_ctx_get_curfds(get_wasi_ctx(module_inst)), fd, callback, user_data);
+}
+
 static inline struct argv_environ_values *
 wasi_ctx_get_argv_environ(wasm_module_inst_t module_inst, wasi_ctx_t wasi_ctx)
 {
