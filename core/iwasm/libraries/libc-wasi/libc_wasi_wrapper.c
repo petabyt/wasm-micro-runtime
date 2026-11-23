@@ -2515,7 +2515,7 @@ static NativeSymbol native_symbols_libc_wasi[] = {
     REG_NATIVE_FUNC(sched_yield, "()i"),
 };
 
-uint32
+WASM_RUNTIME_API_EXTERN uint32
 get_libc_wasi_export_apis(NativeSymbol **p_libc_wasi_apis)
 {
     *p_libc_wasi_apis = native_symbols_libc_wasi;

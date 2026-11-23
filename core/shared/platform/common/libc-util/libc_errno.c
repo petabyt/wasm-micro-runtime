@@ -5,8 +5,9 @@
 
 #include "errno.h"
 #include "libc_errno.h"
+#include "wasm_export.h"
 
-__wasi_errno_t
+WASM_RUNTIME_API_EXTERN __wasi_errno_t
 convert_errno(int error)
 {
     // The C standard library only requires EDOM, EILSEQ and ERANGE to be
